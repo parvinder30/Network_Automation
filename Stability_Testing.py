@@ -2,12 +2,13 @@ import os
 import time
 import datetime
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 # Configuration
-CHECK_INTERVAL = 5  # Check interval in seconds
+PING_INTERVAL = 5  # Ping interval in seconds
 LOG_DIR = "C:\\Logs"  # Directory to store logs
 GENERAL_LOG_FILE = os.path.join(LOG_DIR, "stability_test_log.txt")
-TEST_DURATION = 7 * 24 * 60 * 60   # Test duration: 1 week in seconds
+TEST_DURATION = 100  # Test duration: 1 week in seconds
 
 # Ensure the log directory exists
 if not os.path.exists(LOG_DIR):
@@ -35,17 +36,16 @@ def ping_sta(sta_ip):
     Ping a single STA and return True if reachable, False otherwise.
     """
     try:
-        # Use the 'ping' command with 1 packet and a timeout of 1 second
         result = subprocess.run(
             ["ping", "-n", "1", "-w", "1000", sta_ip],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
         )
-        return result.returncode == 0  # Return True if ping is successful
+        return sta_ip, result.returncode == 0  # Return the IP and reachability status
     except Exception as e:
         print(f"Error pinging {sta_ip}: {e}")
-        return False
+        return sta_ip, False
 
 def log_message(message):
     """
@@ -73,50 +73,43 @@ def log_disconnection(sta_ip, disconnection_time, reconnection_time, duration):
 
 def check_stability(sta_ips):
     """
-    Check the stability of all STAs and log the results.
+    Check the stability of all STAs concurrently and log the results.
     Track disconnections and reconnections with durations.
     """
     global sta_states
 
-    # Update the states of existing STAs and add new ones
-    for sta in sta_ips:
-        if sta not in sta_states:
-            sta_states[sta] = {"reachable": True, "last_unreachable_time": None}
+    current_time = datetime.datetime.now()
 
-    # Remove STAs that are no longer in the provided list
-    disconnected_stas = [sta for sta in sta_states if sta not in sta_ips]
-    for sta in disconnected_stas:
-        del sta_states[sta]
+    # Use ThreadPoolExecutor to ping all STAs concurrently
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(ping_sta, sta_ips))
 
-    # Check the stability of all connected STAs
-    for sta in sta_ips:
-        reachable = ping_sta(sta)
-        current_time = datetime.datetime.now()
+    for sta_ip, reachable in results:
+        if sta_ip not in sta_states:
+            sta_states[sta_ip] = {"reachable": True, "last_unreachable_time": None}
 
         if reachable:
-            if not sta_states[sta]["reachable"]:  # STA was previously unreachable
-                # Calculate the duration of disconnection
-                last_unreachable_time = sta_states[sta]["last_unreachable_time"]
+            if not sta_states[sta_ip]["reachable"]:  # STA was previously unreachable
+                last_unreachable_time = sta_states[sta_ip]["last_unreachable_time"]
                 disconnection_duration = current_time - last_unreachable_time
                 reconnection_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
                 disconnection_time = last_unreachable_time.strftime("%Y-%m-%d %H:%M:%S")
 
                 # Log the disconnection details
-                log_message(f"STA {sta} reconnected after being down for {disconnection_duration}.")
-                log_disconnection(sta, disconnection_time, reconnection_time, disconnection_duration)
+                log_message(f"STA {sta_ip} reconnected after being down for {disconnection_duration}.")
+                log_disconnection(sta_ip, disconnection_time, reconnection_time, disconnection_duration)
 
                 # Update the state
-                sta_states[sta]["reachable"] = True
-                sta_states[sta]["last_unreachable_time"] = None
-            log_message(f"STA {sta} is reachable.")
+                sta_states[sta_ip]["reachable"] = True
+                sta_states[sta_ip]["last_unreachable_time"] = None
+            log_message(f"STA {sta_ip} is reachable.")
         else:
-            if sta_states[sta]["reachable"]:  # STA was previously reachable
-                # Record the time when the STA became unreachable
-                sta_states[sta]["reachable"] = False
-                sta_states[sta]["last_unreachable_time"] = current_time
+            if sta_states[sta_ip]["reachable"]:  # STA was previously reachable
+                sta_states[sta_ip]["reachable"] = False
+                sta_states[sta_ip]["last_unreachable_time"] = current_time
                 disconnection_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
-                log_message(f"STA {sta} is NOT reachable! Disconnection started at {disconnection_time}.")
-            log_message(f"STA {sta} is still unreachable.")
+                log_message(f"STA {sta_ip} is NOT reachable! Disconnection started at {disconnection_time}.")
+            log_message(f"STA {sta_ip} is still unreachable.")
 
 def run_test(sta_ips):
     """
@@ -127,7 +120,7 @@ def run_test(sta_ips):
 
     while time.time() - start_time < TEST_DURATION:
         check_stability(sta_ips)
-        time.sleep(CHECK_INTERVAL)  # Wait for the specified interval before checking again
+        time.sleep(PING_INTERVAL)
 
     log_message("Stability test completed.")
 
